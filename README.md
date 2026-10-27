@@ -193,7 +193,7 @@ asked for (`lines()`, `rects()`, `curves()`, `images()`, `objects()`, `edges()`,
 
 ```bash
 composer install
-vendor/bin/phpunit                     # fixtures checked against pdfplumber's recorded output
+vendor/bin/pest                        # fixtures checked against pdfplumber's recorded output
 python3 bench/make_samples.py          # regenerate the fixtures (reportlab, fpdf2, pypdf)
 python3 tools/make_expected.py         # record pdfplumber's output for them
 python3 bench/compare.py               # compare on the whole corpus (bench/corpus.py lists it)

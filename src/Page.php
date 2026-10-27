@@ -535,11 +535,27 @@ final class Page
         bool $returnGroups = true,
         mixed ...$options,
     ): array {
-        if ($regex && @preg_match($pattern, '') === false) {
+        if ($regex && ! self::delimited($pattern)) {
             $pattern = '~'.str_replace('~', '\~', $pattern).'~u';
         }
 
         return $this->textMap($options)->search($pattern, $regex, $case, $mainGroup, $returnChars, $returnGroups);
+    }
+
+    /**
+     * Whether a pattern has PCRE delimiters: an ASCII punctuation mark (not a backslash) at the start
+     * and the same mark, or the closing bracket, before the modifiers at the end.
+     */
+    private static function delimited(string $pattern): bool
+    {
+        $open = $pattern[0] ?? '';
+        if (! ctype_punct($open) || $open === '\\') {
+            return false;
+        }
+        $close = ['(' => ')', '[' => ']', '{' => '}', '<' => '>'][$open] ?? $open;
+        $end = strrpos($pattern, $close);
+
+        return $end > 0 && strspn($pattern, 'imsxuADSUXJn', $end + 1) === strlen($pattern) - $end - 1;
     }
 
     /**
