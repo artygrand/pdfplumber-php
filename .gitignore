@@ -1,0 +1,10 @@
+/vendor/
+/composer.lock
+/.phpunit.cache/
+/.venv/
+/.pyvendor-linux/
+/.src/
+/bench/out/
+/bench/corpus/
+/bench/samples/
+__pycache__/

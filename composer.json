@@ -1,0 +1,39 @@
+{
+    "name": "artygrand/pdfplumber-php",
+    "description": "Pure PHP port of pdfplumber: characters with coordinates, words, page text, text from an area, lines, rects and tables, without native dependencies",
+    "keywords": ["pdf", "text", "table", "extract", "pdfplumber", "pdfminer", "parser"],
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "ArtyGrand",
+            "email": "artygrand@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "ext-mbstring": "*",
+        "ext-zlib": "*"
+    },
+    "suggest": {
+        "ext-openssl": "Needed for PDFs encrypted with AES"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Artygrand\\Pdfplumber\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Artygrand\\Pdfplumber\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable"
+}
