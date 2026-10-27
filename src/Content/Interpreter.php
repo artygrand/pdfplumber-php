@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Artygrand\Pdfplumber\Content;
 
 use Artygrand\Pdfplumber\Char;
+use Artygrand\Pdfplumber\Figure;
 use Artygrand\Pdfplumber\Graphic;
+use Artygrand\Pdfplumber\Image;
 use Artygrand\Pdfplumber\Font\Font;
 use Artygrand\Pdfplumber\Font\FontLoader;
 use Artygrand\Pdfplumber\Parser\Dict;
@@ -19,9 +21,8 @@ use Artygrand\Pdfplumber\Parser\Stream;
 
 /**
  * Runs a page's content streams and collects the characters it shows, with pdfminer.six's
- * geometry (text matrix, character spacing, font descent) so positions match pdfplumber.
- *
- * Only text matters here: paths, colours and images are skipped.
+ * geometry (text matrix, character spacing, font descent) so positions match pdfplumber, and,
+ * when asked for, the lines, rects, curves and images it draws.
  */
 final class Interpreter
 {
@@ -30,10 +31,36 @@ final class Interpreter
     /** @var list<Char> */
     public array $chars = [];
 
-    /** @var list<Graphic> */
+    /** @var list<Graphic|Image> lines, rects, curves and images, in drawing order */
     public array $graphics = [];
 
+    /** @var array<string, true> object types in the order they first appear, as pdfplumber's objects keys */
+    public array $kinds = [];
+
+    /** @var list<Char|Graphic|Figure> what the page draws, figures holding what they draw (with layout only) */
+    public array $tree = [];
+
+    /** @var \SplObjectStorage<Char|Figure, array{0: float, 1: float}> x0 and x1 before the MediaBox shift, for layout */
+    public \SplObjectStorage $positions;
+
+    /** the figure being drawn into, while the tree is built */
+    private ?Figure $figure = null;
+
     private ?Font $missingFont = null;
+
+    /** marked-content id and tag of the sequence being drawn */
+    private ?int $mcid = null;
+
+    private ?string $tag = null;
+
+    /**
+     * The object drawn last in the current page or form: pdfplumber stamps the current marked
+     * content on it after every char, path and image, also when a path draws nothing. False stands
+     * for an object that is not kept (a form, or a graphic when graphics are not collected).
+     */
+    private Char|Graphic|Image|false|null $last = null;
+
+    private int $inlineImages = 0;
 
     /** @var array<int, true> form streams being run, to stop circular forms */
     private array $running = [];
@@ -52,7 +79,9 @@ final class Interpreter
         private readonly float $doctop,
         private readonly int $pageNumber,
         private readonly bool $withGraphics = false,
+        private readonly bool $withLayout = false,
     ) {
+        $this->positions = new \SplObjectStorage();
     }
 
     /**
@@ -79,6 +108,7 @@ final class Interpreter
         $xobjects = $xobjects instanceof Dict ? $xobjects->entries : [];
         /** @var array<array-key, Font> $loadedFonts */
         $loadedFonts = [];
+        $colorSpaces = null;
 
         // Text state, kept in locals because the loop below runs once per operator.
         $font = null;
@@ -91,7 +121,12 @@ final class Interpreter
         $tm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         $line = [0.0, 0.0];
         $lineWidth = 0.0;
+        $dash = null;
+        // Colour spaces as [name, components], colours as pdfminer keeps them.
+        $strokeSpace = $fillSpace = ['DeviceGray', 1];
+        $strokeColor = $fillColor = 0;
         $path = [];
+        $shape = '';
         $graphics = $this->withGraphics;
         $stack = [];
 
@@ -117,14 +152,81 @@ final class Interpreter
                 case 'q':
                     $stack[] = [
                         $ctm, $font, $fontSize, $charSpace, $wordSpace, $scaling, $leading, $rise, $tm, $line,
-                        $lineWidth,
+                        $lineWidth, $dash, $strokeSpace, $fillSpace, $strokeColor, $fillColor,
                     ];
                     break;
                 case 'Q':
                     if ($stack !== []) {
                         [$ctm, $font, $fontSize, $charSpace, $wordSpace, $scaling, $leading, $rise, $tm, $line,
-                            $lineWidth] = array_pop($stack);
+                            $lineWidth, $dash, $strokeSpace, $fillSpace, $strokeColor, $fillColor] = array_pop($stack);
                     }
+                    break;
+                case 'd':
+                    if ($count >= 2) {
+                        $dash = [$args[$count - 2], $args[$count - 1]];
+                    }
+                    break;
+                case 'CS':
+                case 'cs':
+                    if ($count >= 1 && $args[$count - 1] instanceof Name) {
+                        $colorSpaces ??= $this->colorSpaces($resources);
+                        $space = $colorSpaces[$args[$count - 1]->name] ?? null;
+                        if ($space !== null && $token->name === 'CS') {
+                            $strokeSpace = $space;
+                        } elseif ($space !== null) {
+                            $fillSpace = $space;
+                        }
+                    }
+                    break;
+                case 'G':
+                case 'g':
+                    $value = $count >= 1 ? self::number($args[$count - 1]) : null;
+                    if ($value !== null && $token->name === 'G') {
+                        [$strokeColor, $strokeSpace] = [$value, ['DeviceGray', 1]];
+                    } elseif ($value !== null) {
+                        [$fillColor, $fillSpace] = [$value, ['DeviceGray', 1]];
+                    }
+                    break;
+                case 'RG':
+                case 'rg':
+                    $value = $count >= 3 ? self::numbers(array_slice($args, -3)) : null;
+                    if ($value !== null && $token->name === 'RG') {
+                        [$strokeColor, $strokeSpace] = [$value, ['DeviceRGB', 3]];
+                    } elseif ($value !== null) {
+                        [$fillColor, $fillSpace] = [$value, ['DeviceRGB', 3]];
+                    }
+                    break;
+                case 'K':
+                case 'k':
+                    $value = $count >= 4 ? self::numbers(array_slice($args, -4)) : null;
+                    if ($value !== null && $token->name === 'K') {
+                        [$strokeColor, $strokeSpace] = [$value, ['DeviceCMYK', 4]];
+                    } elseif ($value !== null) {
+                        [$fillColor, $fillSpace] = [$value, ['DeviceCMYK', 4]];
+                    }
+                    break;
+                case 'SC':
+                case 'SCN':
+                    $strokeColor = self::color($args, $strokeSpace) ?? $strokeColor;
+                    break;
+                case 'sc':
+                case 'scn':
+                    $fillColor = self::color($args, $fillSpace) ?? $fillColor;
+                    break;
+                case 'BMC':
+                case 'BDC':
+                    $props = $token->name === 'BDC' ? 1 : 0;
+                    if ($count > $props && $args[$count - 1 - $props] instanceof Name) {
+                        $this->tag = $args[$count - 1 - $props]->name;
+                        $mcid = $props === 1 && $args[$count - 1] instanceof Dict
+                            ? $args[$count - 1]->get('MCID')
+                            : null;
+                        $this->mcid = is_int($mcid) ? $mcid : null;
+                    }
+                    break;
+                case 'EMC':
+                    $this->mcid = null;
+                    $this->tag = null;
                     break;
                 case 'w':
                     $value = $count >= 1 ? self::number($args[$count - 1]) : null;
@@ -134,39 +236,44 @@ final class Interpreter
                     break;
                 case 'm':
                 case 'l':
-                    if ($graphics && $count >= 2) {
-                        $point = self::numbers(array_slice($args, -2));
-                        if ($point !== null) {
+                    $point = $count >= 2 ? self::numbers(array_slice($args, -2)) : null;
+                    if ($point !== null) {
+                        $shape .= $token->name;
+                        if ($graphics) {
                             $path[] = [$token->name, ...$point];
                         }
                     }
                     break;
                 case 'c':
-                    if ($graphics && $count >= 6) {
-                        $points = self::numbers(array_slice($args, -6));
-                        if ($points !== null) {
+                    $points = $count >= 6 ? self::numbers(array_slice($args, -6)) : null;
+                    if ($points !== null) {
+                        $shape .= 'c';
+                        if ($graphics) {
                             $path[] = ['c', ...$points];
                         }
                     }
                     break;
                 case 'v':
                 case 'y':
-                    if ($graphics && $count >= 4) {
-                        $points = self::numbers(array_slice($args, -4));
-                        if ($points !== null) {
+                    $points = $count >= 4 ? self::numbers(array_slice($args, -4)) : null;
+                    if ($points !== null) {
+                        $shape .= $token->name;
+                        if ($graphics) {
                             $path[] = [$token->name, ...$points];
                         }
                     }
                     break;
                 case 'h':
+                    $shape .= 'h';
                     if ($graphics) {
                         $path[] = ['h'];
                     }
                     break;
                 case 're':
-                    if ($graphics && $count >= 4) {
-                        $rect = self::numbers(array_slice($args, -4));
-                        if ($rect !== null) {
+                    $rect = $count >= 4 ? self::numbers(array_slice($args, -4)) : null;
+                    if ($rect !== null) {
+                        $shape .= 'mlllh';
+                        if ($graphics) {
                             [$rx, $ry, $rw, $rh] = $rect;
                             $path[] = ['m', $rx, $ry];
                             $path[] = ['l', $rx + $rw, $ry];
@@ -184,19 +291,33 @@ final class Interpreter
                 case 'B*':
                 case 'b':
                 case 'b*':
+                    $name = $token->name;
+                    if ($name === 's' || $name === 'b' || $name === 'b*') {
+                        $shape .= 'h';
+                        $path[] = ['h'];
+                    }
                     if ($graphics) {
-                        $name = $token->name;
-                        if ($name === 's' || $name === 'b' || $name === 'b*') {
-                            $path[] = ['h'];
-                        }
-                        $stroke = $name !== 'f' && $name !== 'f*';
-                        $fill = $name !== 'S' && $name !== 's';
-                        $this->paint($path, $ctm, $lineWidth, $stroke, $fill);
+                        $this->paint($path, $ctm, [
+                            'linewidth' => $lineWidth,
+                            'stroke' => $name !== 'f' && $name !== 'f*',
+                            'fill' => $name !== 'S' && $name !== 's',
+                            'evenodd' => str_ends_with($name, '*'),
+                            'stroking_color' => $strokeColor,
+                            'non_stroking_color' => $fillColor,
+                            'dash' => $dash,
+                        ]);
+                    } elseif (self::draws($shape)) {
+                        $this->last = false;
+                    }
+                    if (! self::draws($shape)) {
+                        $this->stamp();
                     }
                     $path = [];
+                    $shape = '';
                     break;
                 case 'n':
                     $path = [];
+                    $shape = '';
                     break;
                 case 'cm':
                     $matrix = $count >= 6 ? self::matrix(array_slice($args, -6)) : null;
@@ -300,16 +421,21 @@ final class Interpreter
                         $rise,
                         self::multiply($tm, $ctm),
                         $line,
+                        [$fillSpace[0], is_array($strokeColor) ? $strokeColor : [$strokeColor],
+                            is_array($fillColor) ? $fillColor : [$fillColor]],
                     );
                     break;
                 case 'Do':
                     $name = $count >= 1 ? $args[$count - 1] : null;
-                    if ($name instanceof Name && isset($xobjects[$name->name]) && $depth < self::MAX_FORM_DEPTH) {
-                        $this->form($xobjects[$name->name], $resources, $ctm, $depth);
+                    if ($name instanceof Name && isset($xobjects[$name->name])) {
+                        $this->xobject($name->name, $xobjects[$name->name], $resources, $ctm, $depth);
                     }
                     break;
                 case 'BI':
-                    $this->skipInlineImage($lexer, $parser);
+                    $image = $this->inlineImage($lexer, $parser);
+                    if ($image !== null && $image->dict->has('W') && $image->dict->has('H')) {
+                        $this->image('inline-'.++$this->inlineImages, $image, $ctm);
+                    }
                     break;
             }
             $args = [];
@@ -322,6 +448,7 @@ final class Interpreter
      * @param list<mixed> $items
      * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $matrix
      * @param array{0: float, 1: float} $line
+     * @param array{0: string, 1: list<mixed>, 2: list<mixed>} $colors fill colour space, stroke and fill colours
      *
      * @return array{0: float, 1: float}
      */
@@ -335,7 +462,12 @@ final class Interpreter
         float $rise,
         array $matrix,
         array $line,
+        array $colors,
     ): array {
+        [$ncs, $strokeColor, $fillColor] = $colors;
+        $mcid = $this->mcid;
+        $tag = $this->tag;
+        $last = null;
         $scaling *= 0.01;
         $charSpace *= $scaling;
         $wordSpace = $font->multibyte ? 0.0 : $wordSpace * $scaling;
@@ -405,7 +537,7 @@ final class Interpreter
                 $y1 = (float) max($bottom1, $bottom2, $top1, $top2);
 
                 $text = $font->text($cid) ?? "(cid:{$cid})";
-                $this->chars[] = new Char(
+                $this->chars[] = $last = new Char(
                     $text,
                     $font->fontname,
                     $vertical ? $x1 - $x0 : $y1 - $y0,
@@ -415,11 +547,23 @@ final class Interpreter
                     $y0,
                     $left !== 0.0 ? $x1 + $left : $x1,
                     $y1,
+                    $x1 - $x0,
+                    $y1 - $y0,
                     $height - $y1 + $top,
                     $height - $y0 + $top,
                     $this->doctop + ($height - $y1 + $top),
                     $this->pageNumber,
+                    [$a, $b, $c, $d, $ge, $gf],
+                    $ncs,
+                    $strokeColor,
+                    $fillColor,
+                    $mcid,
+                    $tag,
                 );
+                if ($this->withLayout) {
+                    $this->positions[$last] = [$x0, $x1];
+                    $this->place($last);
+                }
 
                 if ($vertical) {
                     $y += $adv;
@@ -437,6 +581,11 @@ final class Interpreter
             }
         }
 
+        if ($last !== null) {
+            $this->last = $last;
+            $this->kinds['char'] ??= true;
+        }
+
         return [(float) $x, (float) $y];
     }
 
@@ -445,8 +594,9 @@ final class Interpreter
      *
      * @param list<list<string|float>> $path
      * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $ctm
+     * @param array<string, mixed> $state line width, stroke, fill, evenodd, colours and dash
      */
-    private function paint(array $path, array $ctm, float $lineWidth, bool $stroke, bool $fill): void
+    private function paint(array $path, array $ctm, array $state): void
     {
         if ($path === [] || $path[0][0] !== 'm') {
             return;
@@ -455,7 +605,7 @@ final class Interpreter
         if (substr_count($shape, 'm') > 1) {
             preg_match_all('/m[^m]+/', $shape, $subpaths, PREG_OFFSET_CAPTURE);
             foreach ($subpaths[0] as [$subpath, $offset]) {
-                $this->paint(array_slice($path, $offset, strlen($subpath)), $ctm, $lineWidth, $stroke, $fill);
+                $this->paint(array_slice($path, $offset, strlen($subpath)), $ctm, $state);
             }
 
             return;
@@ -463,20 +613,31 @@ final class Interpreter
         [$a, $b, $c, $d, $e, $f] = $ctm;
         $start = $path[0];
         $pts = [];
+        $drawn = [];
         foreach ($path as $segment) {
             $source = $segment[0] === 'h' ? $start : $segment;
             $n = count($source);
             $x = $source[$n - 2];
             $y = $source[$n - 1];
             $pts[] = [$a * $x + $c * $y + $e, $b * $x + $d * $y + $f];
+            $points = [$segment[0]];
+            for ($i = 1; $i + 1 < count($segment); $i += 2) {
+                [$px, $py] = [$segment[$i], $segment[$i + 1]];
+                $points[] = [
+                    $this->left + ($a * $px + $c * $py + $e),
+                    $this->top + $this->height - ($b * $px + $d * $py + $f),
+                ];
+            }
+            $drawn[] = $points;
         }
+        $state['path'] = $drawn;
         if (strlen($shape) > 3 && str_ends_with($shape, 'lh') && $pts[count($pts) - 2] == $pts[0]) {
             $shape = substr($shape, 0, -2).'h';
             array_pop($pts);
         }
 
         if ($shape === 'mlh' || $shape === 'ml') {
-            $this->graphic('line', [$pts[0], $pts[1]], $lineWidth, $stroke, $fill);
+            $this->graphic('line', [$pts[0], $pts[1]], $state);
 
             return;
         }
@@ -486,18 +647,19 @@ final class Interpreter
             $square = ($x0 == $x1 && $y1 == $y2 && $x2 == $x3 && $y3 == $y0)
                 || ($y0 == $y1 && $x1 == $x2 && $y2 == $y3 && $x3 == $x0);
             if ($closed && $square) {
-                $this->graphic('rect', [[$x0, $y0], [$x2, $y0], [$x2, $y2], [$x0, $y2]], $lineWidth, $stroke, $fill);
+                $this->graphic('rect', [[$x0, $y0], [$x2, $y0], [$x2, $y2], [$x0, $y2]], $state);
 
                 return;
             }
         }
-        $this->graphic('curve', $pts, $lineWidth, $stroke, $fill);
+        $this->graphic('curve', $pts, $state);
     }
 
     /**
      * @param list<array{0: float, 1: float}> $pts points in PDF space relative to the MediaBox
+     * @param array<string, mixed> $state
      */
-    private function graphic(string $type, array $pts, float $lineWidth, bool $stroke, bool $fill): void
+    private function graphic(string $type, array $pts, array $state): void
     {
         $x0 = $y0 = 2147483647;
         $x1 = $y1 = -2147483647;
@@ -512,7 +674,7 @@ final class Interpreter
         $width = $x1 - $x0;
         $height = $y1 - $y0;
         $top = $this->height - $y1 + $this->top;
-        $this->graphics[] = new Graphic(
+        $this->graphics[] = $this->last = new Graphic(
             $type,
             (float) ($this->left !== 0.0 ? $x0 + $this->left : $x0),
             (float) $y0,
@@ -524,68 +686,310 @@ final class Interpreter
             (float) $width,
             (float) $height,
             $points,
-            $lineWidth,
-            $stroke,
-            $fill,
+            $state['linewidth'],
+            $state['stroke'],
+            $state['fill'],
             $this->pageNumber,
+            $state['evenodd'],
+            $state['stroking_color'],
+            $state['non_stroking_color'],
+            $state['path'],
+            $state['dash'],
+            $this->mcid,
+            $this->tag,
         );
+        $this->kinds[$type] ??= true;
+        if ($this->withLayout) {
+            $this->place($this->last);
+        }
     }
 
     /**
+     * Runs a form XObject, or places an image XObject.
+     *
      * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $ctm
      */
-    private function form(mixed $reference, Dict $resources, array $ctm, int $depth): void
+    private function xobject(string $name, mixed $reference, Dict $resources, array $ctm, int $depth): void
     {
         $id = $reference instanceof Ref ? $reference->id : 0;
-        if ($id > 0 && isset($this->running[$id])) {
+        $xobject = $this->document->resolve($reference);
+        if (! $xobject instanceof Stream) {
             return;
         }
-        $form = $this->document->resolve($reference);
-        if (! $form instanceof Stream) {
+        $subtype = $xobject->get('Subtype');
+        $subtype = $subtype instanceof Name ? $subtype->name : null;
+        if ($subtype === 'Image' && $xobject->dict->has('Width') && $xobject->dict->has('Height')) {
+            $this->image($name, $xobject, $ctm);
+
             return;
         }
-        $subtype = $form->get('Subtype');
-        if (! $subtype instanceof Name || $subtype->name !== 'Form' || ! $form->dict->has('BBox')) {
+        if ($subtype !== 'Form' || ! $xobject->dict->has('BBox')) {
             return;
         }
-        $matrix = $this->document->resolve($form->get('Matrix'));
+        $matrix = $this->document->resolve($xobject->get('Matrix'));
         $matrix = is_array($matrix) && count($matrix) >= 6
             ? self::matrix(array_map(fn ($value) => $this->document->resolve($value), array_slice($matrix, 0, 6)))
             : null;
-        $own = $form->get('Resources');
+        $own = $xobject->get('Resources');
         if (! $own instanceof Ref && (! $own instanceof Dict || $own->entries === [])) {
             $own = $resources;
         }
+        $running = $id > 0 && isset($this->running[$id]);
         if ($id > 0) {
             $this->running[$id] = true;
         }
+        // A form is a container of its own: what it draws is not the page's last object.
+        $this->last = null;
+        $formCtm = self::multiply($matrix ?? [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], $ctm);
+        $parent = $this->figure;
+        $figure = null;
+        if ($this->withLayout) {
+            $box = $this->document->resolve($xobject->get('BBox'));
+            $box = is_array($box) && count($box) === 4
+                ? self::numbers(array_map(fn ($v) => $this->document->resolve($v), $box))
+                : null;
+            $this->figure = $figure = $this->figure($name, $box ?? [0.0, 0.0, 0.0, 0.0], $formCtm);
+        }
         try {
-            $this->run([$form], $own, self::multiply($matrix ?? [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], $ctm), $depth + 1);
+            // A form that is already running (a loop) makes an empty figure, as in pdfminer.
+            if (! $running && $depth < self::MAX_FORM_DEPTH) {
+                $this->run([$xobject], $own, $formCtm, $depth + 1);
+            }
         } finally {
-            unset($this->running[$id]);
+            if (! $running) {
+                unset($this->running[$id]);
+            }
+            $this->last = false;
+            $this->figure = $parent;
+            if ($figure !== null) {
+                $this->place($figure);
+            }
         }
     }
 
-    private function skipInlineImage(Lexer $lexer, Parser $parser): void
+    /**
+     * An image fills the unit square of the current transformation.
+     *
+     * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $ctm
+     */
+    private function image(string $name, Stream $stream, array $ctm): void
     {
-        $ascii85 = false;
-        while (($token = $lexer->next()) !== null) {
-            if ($token instanceof Keyword && $token->name === 'ID') {
+        $this->last = false;
+        if (! $this->withGraphics) {
+            return;
+        }
+        [$a, $b, $c, $d, $e, $f] = $ctm;
+        $xs = [$e, $a + $e, $a + $c + $e, $c + $e];
+        $ys = [$f, $b + $f, $b + $d + $f, $d + $f];
+        [$x0, $y0, $x1, $y1] = [(float) min($xs), (float) min($ys), (float) max($xs), (float) max($ys)];
+        $raw = static function (array $keys, mixed $default = null) use ($stream): mixed {
+            foreach ($keys as $key) {
+                if (array_key_exists($key, $stream->dict->entries)) {
+                    return $stream->dict->entries[$key];
+                }
+            }
+
+            return $default;
+        };
+        $any = fn (array $keys, mixed $default = null): mixed => $this->document->plain($raw($keys, $default));
+        // A colour space given by reference is one item, even when it refers to an array.
+        $colorspace = $raw(['CS', 'ColorSpace']);
+        $colorspace = $this->document->plain(is_array($colorspace) ? $colorspace : [$colorspace]);
+        $top = $this->height - $y1 + $this->top;
+        $this->graphics[] = $image = new Image(
+            $name,
+            $stream,
+            [$any(['W', 'Width']), $any(['H', 'Height'])],
+            $any(['IM', 'ImageMask']),
+            $any(['BPC', 'BitsPerComponent'], 1),
+            $colorspace,
+            $this->left !== 0.0 ? $x0 + $this->left : $x0,
+            $y0,
+            $this->left !== 0.0 ? $x1 + $this->left : $x1,
+            $y1,
+            $top,
+            $this->height - $y0 + $this->top,
+            $this->doctop + $top,
+            $x1 - $x0,
+            $y1 - $y0,
+            $this->pageNumber,
+            $this->mcid,
+            $this->tag,
+        );
+        $this->kinds['image'] ??= true;
+        if ($this->withLayout) {
+            $figure = $this->figure($name, [0.0, 0.0, 1.0, 1.0], $ctm);
+            $figure->items[] = $image;
+            $this->place($figure);
+        }
+    }
+
+    /**
+     * pdfminer's LTFigure: the box (x, y, width, height) through the matrix.
+     *
+     * @param array{0: float, 1: float, 2: float, 3: float} $box
+     * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $matrix
+     */
+    private function figure(string $name, array $box, array $matrix): Figure
+    {
+        [$x, $y, $w, $h] = $box;
+        [$a, $b, $c, $d, $e, $f] = $matrix;
+        $xs = [];
+        $ys = [];
+        foreach ([[$x, $y], [$x + $w, $y], [$x + $w, $y + $h], [$x, $y + $h]] as [$px, $py]) {
+            $xs[] = $a * $px + $c * $py + $e;
+            $ys[] = $b * $px + $d * $py + $f;
+        }
+        [$x0, $y0, $x1, $y1] = [(float) min($xs), (float) min($ys), (float) max($xs), (float) max($ys)];
+        $top = $this->height - $y1 + $this->top;
+
+        $figure = new Figure(
+            $name,
+            $matrix,
+            $this->left !== 0.0 ? $x0 + $this->left : $x0,
+            $y0,
+            $this->left !== 0.0 ? $x1 + $this->left : $x1,
+            $y1,
+            $top,
+            $this->height - $y0 + $this->top,
+            $this->doctop + $top,
+            $x1 - $x0,
+            $y1 - $y0,
+            $this->pageNumber,
+        );
+        $this->positions[$figure] = [$x0, $x1];
+
+        return $figure;
+    }
+
+    private function place(Char|Graphic|Figure $object): void
+    {
+        if ($this->figure !== null) {
+            $this->figure->items[] = $object;
+        } else {
+            $this->tree[] = $object;
+        }
+    }
+
+    /**
+     * Reads an inline image (BI … ID data EI) as a stream, the way pdfminer's content parser does.
+     */
+    private function inlineImage(Lexer $lexer, Parser $parser): ?Stream
+    {
+        $entries = [];
+        while (true) {
+            $key = $parser->read();
+            if ($key === null || ($key instanceof Keyword && $key->name === 'ID')) {
                 break;
             }
-            if ($token instanceof Name && ($token->name === 'F' || $token->name === 'Filter')) {
-                $filter = $parser->read();
-                $first = is_array($filter) ? ($filter[0] ?? null) : $filter;
-                $ascii85 = $first instanceof Name && in_array($first->name, ['A85', 'ASCII85Decode'], true);
+            $value = $parser->read();
+            if ($key instanceof Name) {
+                $entries[$key->name] = $value;
             }
         }
+        $filter = $entries['F'] ?? null;
+        $first = is_array($filter) ? ($filter[0] ?? null) : $filter;
+        $ascii85 = $first instanceof Name && in_array($first->name, ['A85', 'ASCII85Decode'], true);
+
         $start = $lexer->pos + 1;
         $pattern = $ascii85 ? '/~>[ \t\n\r\x0B\f]/' : '/EI[ \t\n\r\x0B\f]/';
-        if (preg_match($pattern, $lexer->data, $match, PREG_OFFSET_CAPTURE, $start) === 1) {
-            // After "~>" the EI operator is still ahead and is read as a plain keyword.
-            $lexer->pos = $match[0][1] + 2;
-        } else {
+        if (preg_match($pattern, $lexer->data, $match, PREG_OFFSET_CAPTURE, $start) !== 1) {
             $lexer->pos = $lexer->length;
+
+            return null;
+        }
+        $end = $match[0][1];
+        // After "~>" the EI operator is still ahead and is read as a plain keyword.
+        $lexer->pos = $end + 2;
+        $data = (string) preg_replace('/(\r\n|[\r\n])$/', '', substr($lexer->data, $start, $end - $start));
+
+        return $key === null ? null : new Stream(new Dict($entries), $ascii85 ? $data.'~>' : $data);
+    }
+
+    /**
+     * Colour spaces by resource name, with the device ones, as pdfminer's csmap.
+     *
+     * @return array<string, array{0: string, 1: int}>
+     */
+    private function colorSpaces(Dict $resources): array
+    {
+        $predefined = [
+            'DeviceGray' => ['DeviceGray', 1], 'CalRGB' => ['CalRGB', 3], 'CalGray' => ['CalGray', 1],
+            'Lab' => ['Lab', 3], 'DeviceRGB' => ['DeviceRGB', 3], 'DeviceCMYK' => ['DeviceCMYK', 4],
+            'Separation' => ['Separation', 1], 'Indexed' => ['Indexed', 1], 'Pattern' => ['Pattern', 1],
+        ];
+        $spaces = $predefined;
+        $defined = $this->document->resolve($resources->get('ColorSpace'));
+        foreach ($defined instanceof Dict ? $defined->entries : [] as $key => $spec) {
+            $spec = $this->document->resolve($spec);
+            $name = is_array($spec) ? $this->document->resolve($spec[0] ?? null) : $spec;
+            $name = $name instanceof Name ? $name->name : null;
+            if ($name === 'ICCBased' && is_array($spec) && count($spec) >= 2) {
+                $profile = $this->document->resolve($spec[1]);
+                $n = $profile instanceof Stream ? $this->document->resolve($profile->get('N')) : null;
+                $spaces[$key] = ['ICCBased', is_int($n) ? $n : 0];
+            } elseif ($name === 'DeviceN' && is_array($spec) && count($spec) >= 2) {
+                $names = $this->document->resolve($spec[1]);
+                $spaces[$key] = ['DeviceN', is_array($names) ? count($names) : 0];
+            } elseif ($name !== null && isset($predefined[$name])) {
+                $spaces[$key] = $predefined[$name];
+            }
+        }
+
+        return $spaces;
+    }
+
+    /**
+     * The colour an SC/SCN/sc/scn operator sets, as pdfminer parses it, or null to keep the old one.
+     *
+     * @param list<mixed> $args
+     * @param array{0: string, 1: int} $space
+     */
+    private static function color(array $args, array $space): mixed
+    {
+        [$name, $n] = $space;
+        $components = $n > 0 ? array_slice($args, -$n) : [];
+        if ($n === 0 || count($components) !== $n) {
+            return null;
+        }
+        if ($name === 'Pattern') {
+            $pattern = $components[$n - 1];
+
+            return $pattern instanceof Name ? $pattern->name : null;
+        }
+        $values = self::numbers($components);
+        if ($values === null) {
+            return null;
+        }
+
+        return match ($n) {
+            1 => $values[0],
+            3, 4 => $values,
+            default => null,
+        };
+    }
+
+    /**
+     * Whether pdfminer's paint_path draws anything for a path of these operators.
+     */
+    private static function draws(string $shape): bool
+    {
+        if (! str_starts_with($shape, 'm')) {
+            return false;
+        }
+
+        return substr_count($shape, 'm') === 1 || preg_match('/m[^m]+/', $shape) === 1;
+    }
+
+    /**
+     * Gives the current marked content to the last object drawn, as pdfplumber does after a path
+     * that draws nothing.
+     */
+    private function stamp(): void
+    {
+        if ($this->last instanceof Char || $this->last instanceof Graphic || $this->last instanceof Image) {
+            $this->last->mcid = $this->mcid;
+            $this->last->tag = $this->tag;
         }
     }
 

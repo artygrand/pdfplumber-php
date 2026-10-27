@@ -249,12 +249,74 @@ def embedded_ttf(path):
     pdf.output(path)
 
 
+def objects(path):
+    """A hand-written PDF with what reportlab and fpdf2 don't write: marked content and a structure
+    tree, colours in several spaces, a dash, a curve, image, form and inline image XObjects, links
+    and a note annotation, a rotated page and UTF-16 metadata."""
+    content1 = b"""/P <</MCID 0>> BDC
+BT /F1 12 Tf 1 0 0 rg 20 170 Td (Red text) Tj ET
+EMC
+/Span <</MCID 1>> BDC
+BT /F1 10 Tf 0 0 1 RG 0.2 0.4 0.6 0.1 k 20 150 Td (CMYK) Tj ET
+EMC
+/Artifact BMC
+q 2 w [3 2] 1 d 0 1 0 RG 20 120 m 280 120 l S Q
+EMC
+q /CS0 cs 0.5 0.25 0 scn 20 60 100 40 re f Q
+q 0.5 G 150 60 m 180 100 220 100 250 60 c S Q
+q 40 0 0 20 150 20 cm /Im1 Do Q
+q 1 0 0 1 200 10 cm /Fm1 Do Q
+q 10 0 0 10 260 20 cm BI /W 2 /H 1 /BPC 8 /CS /G ID \x00\xff EI Q
+"""
+    content2 = b"BT /F1 12 Tf 20 100 Td (Second page) Tj ET\n"
+    form = b"0 0 1 rg 0 0 30 20 re f BT /F1 8 Tf 2 5 Td (Form) Tj ET"
+    utf16 = lambda text: b"<FEFF" + text.encode("utf-16-be").hex().upper().encode() + b">"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 10 0 R /MarkInfo << /Marked true >> >>",
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 5 0 R /StructParents 0"
+        b" /Resources << /Font << /F1 7 0 R >> /XObject << /Im1 8 0 R /Fm1 9 0 R >>"
+        b" /ColorSpace << /CS0 /DeviceRGB >> >> /Annots [13 0 R 14 0 R] >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Rotate 90 /Contents 6 0 R"
+        b" /Resources << /Font << /F1 7 0 R >> >> /Annots [15 0 R] >>",
+        b"<< /Length %d >>\nstream\n" % len(content1) + content1 + b"\nendstream",
+        b"<< /Length %d >>\nstream\n" % len(content2) + content2 + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB"
+        b" /BitsPerComponent 8 /Length 12 >>\nstream\n\xff\x00\x00\x00\xff\x00\x00\x00\xff\xff\xff\xff\nendstream",
+        b"<< /Type /XObject /Subtype /Form /BBox [0 0 30 20] /Resources << /Font << /F1 7 0 R >> >>"
+        b" /Length %d >>\nstream\n" % len(form) + form + b"\nendstream",
+        b"<< /Type /StructTreeRoot /K [11 0 R] /ParentTree << /Nums [0 [12 0 R 16 0 R]] >> >>",
+        b"<< /Type /StructElem /S /Document /P 10 0 R /K [12 0 R] /Lang (en-US) >>",
+        b"<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K [0 16 0 R] /A << /O /Layout /TextAlign /Start >> >>",
+        b"<< /Type /Annot /Subtype /Link /Rect [20 165 80 182] /Border [0 0 0]"
+        b" /A << /S /URI /URI (https://example.com/a) >> >>",
+        b"<< /Type /Annot /Subtype /Text /Rect [250 150 270 170] /T (Reviewer) /Contents "
+        + utf16("Заметка") + b" >>",
+        b"<< /Type /Annot /Subtype /Link /Rect [20 95 120 115] /A << /S /URI /URI (https://example.com/b) >> >>",
+        b"<< /Type /StructElem /S /Span /P 12 0 R /Pg 3 0 R /K 1 /ActualText (CMYK) >>",
+        b"<< /Title " + utf16("Объекты") + b" /Author (pdfplumber-php) /Producer (hand) >>",
+    ]
+    out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for number, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R /Info %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, len(objs), xref)
+    with open(path, "wb") as f:
+        f.write(out)
+
+
 invoice_jp(os.path.join(FIXTURES, "jp-cid.pdf"))
 customs_cn(os.path.join(FIXTURES, "cn-cid.pdf"))
 latin(os.path.join(FIXTURES, "latin.pdf"))
 rotated(os.path.join(FIXTURES, "rotated.pdf"))
 boxes(os.path.join(FIXTURES, "boxes.pdf"))
 tables(os.path.join(FIXTURES, "tables.pdf"))
+objects(os.path.join(FIXTURES, "objects.pdf"))
 many_pages(os.path.join(SAMPLES, "report-300.pdf"), 300)
 if os.path.exists(ARIAL_UNICODE):
     embedded_ttf(os.path.join(SAMPLES, "ttf-embedded.pdf"))

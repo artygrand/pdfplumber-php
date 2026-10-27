@@ -8,7 +8,7 @@ ini_set('serialize_precision', '-1');
 use Artygrand\Pdfplumber\Char;
 use Artygrand\Pdfplumber\Graphic;
 use Artygrand\Pdfplumber\Page;
-use Artygrand\Pdfplumber\Pdf;
+use Artygrand\Pdfplumber\Pdfplumber;
 
 const REGIONS = [[0, 0, 0.5, 0.5], [0.25, 0.25, 0.75, 0.75], [0, 0.8, 1, 1], [0, 0, 0.5, 1]];
 
@@ -28,7 +28,7 @@ function region(Page $page, array $rel): array
 
 $out = ['pages' => [], 'error' => null];
 try {
-    $pdf = Pdf::open($argv[1], $argv[2] ?? '');
+    $pdf = Pdfplumber::open($argv[1], $argv[2] ?? '');
     foreach ($pdf->pages() as $page) {
         $out['pages'][] = [
             'width' => r($page->width),

@@ -101,6 +101,50 @@ final class Document
         return $value instanceof Ref ? null : $value;
     }
 
+    /**
+     * A value with references resolved, names as strings and dictionaries as arrays, as
+     * pdfplumber's resolve_all: references to pages, and an annotation's Parent, stay references.
+     */
+    public function plain(mixed $value, int $depth = 0): mixed
+    {
+        if ($depth > 64) {
+            return $value;
+        }
+        if ($value instanceof Ref) {
+            $resolved = $this->resolve($value);
+            if ($resolved instanceof Dict && $this->isPage($resolved)) {
+                return $value;
+            }
+
+            return $this->plain($resolved, $depth + 1);
+        }
+        if ($value instanceof Name) {
+            return $value->name;
+        }
+        if (is_array($value)) {
+            return array_map(fn (mixed $item): mixed => $this->plain($item, $depth + 1), $value);
+        }
+        if ($value instanceof Dict) {
+            $type = $value->get('Type');
+            $annotation = $type instanceof Name && $type->name === 'Annot';
+            $plain = [];
+            foreach ($value->entries as $key => $item) {
+                $plain[$key] = $annotation && $key === 'Parent' ? $item : $this->plain($item, $depth + 1);
+            }
+
+            return $plain;
+        }
+
+        return $value;
+    }
+
+    private function isPage(Dict $dict): bool
+    {
+        $type = $dict->get('Type');
+
+        return $type instanceof Name && $type->name === 'Page';
+    }
+
     public function decodeStream(Stream $stream, string $raw): string
     {
         if ($this->security !== null && $stream->id > 0 && ! $this->isXrefStream($stream->dict)) {

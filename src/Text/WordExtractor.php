@@ -253,7 +253,7 @@ final class WordExtractor
      */
     public static function sortChars(array $items, string $direction): array
     {
-        $get = static fn ($o, string $key): float => is_array($o) ? $o[$key] : ($key === 'height' ? $o->height() : $o->{$key});
+        $get = static fn ($o, string $key): float => is_array($o) ? $o[$key] : $o->{$key};
         $keys = [];
         foreach ($items as $i => $item) {
             $keys[$i] = match ($direction) {

@@ -40,7 +40,7 @@ final class Table
     /**
      * Rows of cells, null where a row has no cell in a column.
      *
-     * @return list<list<array{0: float, 1: float, 2: float, 3: float}|null>>
+     * @return list<CellGroup>
      */
     public function rows(): array
     {
@@ -50,7 +50,7 @@ final class Table
     /**
      * Columns of cells, null where a column has no cell in a row.
      *
-     * @return list<list<array{0: float, 1: float, 2: float, 3: float}|null>>
+     * @return list<CellGroup>
      */
     public function columns(): array
     {
@@ -69,10 +69,10 @@ final class Table
         $chars = $this->page->chars();
         $table = [];
         foreach ($this->rows() as $row) {
-            $rowBbox = self::groupBbox($row);
+            $rowBbox = $row->bbox;
             $rowChars = array_filter($chars, static fn (Char $c): bool => self::contains($c, $rowBbox));
             $texts = [];
-            foreach ($row as $cell) {
+            foreach ($row->cells as $cell) {
                 if ($cell === null) {
                     $texts[] = null;
                     continue;
@@ -140,24 +140,7 @@ final class Table
     }
 
     /**
-     * @param list<array{0: float, 1: float, 2: float, 3: float}|null> $cells
-     *
-     * @return array{0: float, 1: float, 2: float, 3: float}
-     */
-    private static function groupBbox(array $cells): array
-    {
-        $cells = array_filter($cells);
-
-        return [
-            min(array_column($cells, 0)),
-            min(array_column($cells, 1)),
-            max(array_column($cells, 2)),
-            max(array_column($cells, 3)),
-        ];
-    }
-
-    /**
-     * @return list<list<array{0: float, 1: float, 2: float, 3: float}|null>>
+     * @return list<CellGroup>
      */
     private function groups(int $axis): array
     {
@@ -184,10 +167,10 @@ final class Table
         $groups[] = $byPosition;
 
         return array_map(
-            static fn (array $group): array => array_map(
+            static fn (array $group): CellGroup => new CellGroup(array_map(
                 static fn (string $key): ?array => $group[$key] ?? null,
                 array_keys($positions),
-            ),
+            )),
             $groups,
         );
     }

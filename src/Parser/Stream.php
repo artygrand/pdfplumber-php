@@ -25,6 +25,14 @@ final class Stream
         return $this->dict->entries[$key] ?? $default;
     }
 
+    /**
+     * The stream as stored in the file, or null once data() has decoded it (pdfminer's rawdata).
+     */
+    public function raw(): ?string
+    {
+        return $this->raw;
+    }
+
     public function data(): string
     {
         if ($this->decoded === null) {

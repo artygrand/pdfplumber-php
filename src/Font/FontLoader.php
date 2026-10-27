@@ -194,9 +194,10 @@ final class FontLoader
     {
         $name = $this->resolve($descriptor->get('FontName'));
         if ($name instanceof Name) {
-            $font->fontname = $name->name;
+            // pdfminer keeps a name that is not UTF-8 as bytes and prints it as Python does.
+            $font->fontname = mb_check_encoding($name->name, 'UTF-8') ? $name->name : self::bytesRepr($name->name);
         } elseif (is_string($name)) {
-            $font->fontname = $name;
+            $font->fontname = self::fontnameFromBytes($name);
         }
         $descent = $this->number($this->resolve($descriptor->get('Descent')));
         // Descent must be negative; some writers store it positive.
@@ -400,6 +401,48 @@ final class FontLoader
         }
 
         return $value instanceof Dict ? $value : new Dict();
+    }
+
+    /**
+     * pdfplumber's fix_fontname_bytes for a FontName given as a string: the subset prefix kept, the
+     * Chinese names of common Windows fonts translated, other bytes escaped.
+     */
+    private static function fontnameFromBytes(string $name): string
+    {
+        $split = strpos($name, '+');
+        [$prefix, $suffix] = $split === false ? ['', $name] : [substr($name, 0, $split + 1), substr($name, $split + 1)];
+        $known = [
+            "\xcb\xce\xcc\xe5" => 'SimSun,Regular',
+            "\xba\xda\xcc\xe5" => 'SimHei,Regular',
+            "\xbf\xac\xcc\xe5_GB2312" => 'SimKai,Regular',
+            "\xb7\xc2\xcb\xce_GB2312" => 'SimFang,Regular',
+            "\xc1\xa5\xca\xe9" => 'SimLi,Regular',
+        ];
+
+        return substr(self::bytesRepr($prefix), 2, -1).($known[$suffix] ?? substr(self::bytesRepr($suffix), 2, -1));
+    }
+
+    /**
+     * Python's repr() of bytes: b'…' with \x escapes.
+     */
+    private static function bytesRepr(string $bytes): string
+    {
+        $quote = str_contains($bytes, "'") && ! str_contains($bytes, '"') ? '"' : "'";
+        $repr = '';
+        foreach (str_split($bytes) as $byte) {
+            $code = ord($byte);
+            $repr .= match (true) {
+                $byte === '\\' => '\\\\',
+                $byte === $quote => '\\'.$quote,
+                $byte === "\t" => '\\t',
+                $byte === "\n" => '\\n',
+                $byte === "\r" => '\\r',
+                $code < 0x20 || $code >= 0x7F => sprintf('\\x%02x', $code),
+                default => $byte,
+            };
+        }
+
+        return 'b'.$quote.$repr.$quote;
     }
 
     private function name(mixed $value): ?string

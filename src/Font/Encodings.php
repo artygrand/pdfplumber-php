@@ -106,6 +106,73 @@ final class Encodings
     }
 
     /**
+     * A PDF text string as pdfplumber's decode_text: UTF-16BE after its byte order mark, otherwise
+     * PDFDocEncoding (control bytes kept as they are). A UTF-8 byte order mark, allowed since
+     * PDF 2.0, is also understood.
+     */
+    public static function text(string $value): string
+    {
+        if (str_starts_with($value, "\xFE\xFF")) {
+            return self::utf16(substr($value, 2));
+        }
+        if (str_starts_with($value, "\xEF\xBB\xBF")) {
+            return substr($value, 3);
+        }
+        static $table = null;
+        if ($table === null) {
+            $table = self::table('PDFDocEncoding');
+            // pdfminer's table keeps the control bytes, with 0x16 mapped to U+0017.
+            for ($code = 0; $code < 0x18; $code++) {
+                $table[$code] ??= chr($code === 0x16 ? 0x17 : $code);
+            }
+            $table[0x7F] ??= "\0";
+            $table[0x9F] ??= "\0";
+            $table[0xAD] ??= "\0";
+        }
+        $text = '';
+        for ($i = 0, $n = strlen($value); $i < $n; $i++) {
+            $text .= $table[ord($value[$i])] ?? '';
+        }
+
+        return $text;
+    }
+
+    /**
+     * Python's strict bytes.decode('utf-16'): a byte order mark picks the byte order, little-endian
+     * without one; null when the bytes are not valid UTF-16.
+     */
+    public static function strictUtf16(string $bytes): ?string
+    {
+        if (strlen($bytes) % 2 !== 0) {
+            return null;
+        }
+        $format = 'v*';
+        if (str_starts_with($bytes, "\xFE\xFF") || str_starts_with($bytes, "\xFF\xFE")) {
+            $format = $bytes[0] === "\xFE" ? 'n*' : 'v*';
+            $bytes = substr($bytes, 2);
+        }
+        $units = $bytes === '' ? [] : array_values(unpack($format, $bytes) ?: []);
+        $text = '';
+        for ($i = 0, $n = count($units); $i < $n; $i++) {
+            $unit = $units[$i];
+            if ($unit >= 0xD800 && $unit <= 0xDBFF) {
+                $low = $units[$i + 1] ?? 0;
+                if ($low < 0xDC00 || $low > 0xDFFF) {
+                    return null;
+                }
+                $text .= self::chr(0x10000 + (($unit - 0xD800) << 10) + ($low - 0xDC00));
+                $i++;
+            } elseif ($unit >= 0xDC00 && $unit <= 0xDFFF) {
+                return null;
+            } else {
+                $text .= self::chr($unit);
+            }
+        }
+
+        return $text;
+    }
+
+    /**
      * Decodes UTF-16BE, dropping unpaired surrogates and a trailing odd byte.
      */
     public static function utf16(string $bytes): string

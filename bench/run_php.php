@@ -2,7 +2,7 @@
 $t0 = hrtime(true);
 require __DIR__.'/../vendor/autoload.php';
 $chars = 0;
-$pdf = Artygrand\Pdfplumber\Pdf::open($argv[1], $argv[2] ?? '');
+$pdf = Artygrand\Pdfplumber\Pdfplumber::open($argv[1], $argv[2] ?? '');
 foreach ($pdf->pages() as $page) {
     $chars += mb_strlen($page->extractText());
     $page->close();

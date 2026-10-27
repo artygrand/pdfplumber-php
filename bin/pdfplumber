@@ -1,0 +1,158 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// pdfplumber's command line: a PDF's objects as CSV or JSON, its text, or its structure tree.
+
+use Artygrand\Pdfplumber\Pdfplumber;
+
+foreach ([__DIR__.'/../vendor/autoload.php', __DIR__.'/../../../autoload.php'] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+const USAGE = <<<'TXT'
+usage: pdfplumber [-h] [--structure | --structure-text] [--format {csv,json,text}]
+                  [--types TYPES [TYPES ...]] [--include-attrs ATTRS [ATTRS ...]]
+                  [--exclude-attrs ATTRS [ATTRS ...]] [--precision PRECISION]
+                  [--laparams LAPARAMS] [--pages PAGES [PAGES ...]] [--indent INDENT]
+                  [--password PASSWORD] [infile]
+
+  infile             the PDF; standard input when it is missing or "-"
+  --structure        the structure tree as JSON
+  --structure-text   the structure tree as JSON with the text of each element
+  --format           csv (default), json, or text (each page's text with its layout)
+  --types            object types: char, line, rect, curve, image, annot; with --laparams also
+                     figure, textboxhorizontal, textlinehorizontal and their vertical kinds
+  --include-attrs    only these object attributes
+  --exclude-attrs    all object attributes but these
+  --precision        round numbers to this many decimal places
+  --laparams         layout analysis parameters as JSON, e.g. '{"line_margin": 0.5}'
+  --pages            pages to read: 1 3 5-8
+  --indent           pretty-print JSON
+  --password         the PDF's password
+
+TXT;
+
+$options = ['format' => 'csv', 'types' => null, 'include-attrs' => null, 'exclude-attrs' => null,
+    'precision' => null, 'laparams' => null, 'pages' => null, 'indent' => null, 'password' => '', 'structure' => false,
+    'structure-text' => false, 'infile' => null];
+$args = array_slice($argv, 1);
+if ($args === []) {
+    $args = ['--help'];
+}
+$lists = ['types', 'include-attrs', 'exclude-attrs', 'pages'];
+for ($i = 0; $i < count($args); $i++) {
+    $arg = $args[$i];
+    if ($arg === '-h' || $arg === '--help') {
+        fwrite(STDOUT, USAGE);
+        exit(0);
+    }
+    if (! str_starts_with($arg, '--') || $arg === '-') {
+        $options['infile'] = $arg;
+        continue;
+    }
+    $name = substr($arg, 2);
+    if (! array_key_exists($name, $options) || $name === 'infile') {
+        fwrite(STDERR, USAGE."pdfplumber: unknown option {$arg}\n");
+        exit(2);
+    }
+    if (is_bool($options[$name])) {
+        $options[$name] = true;
+        continue;
+    }
+    if (in_array($name, $lists, true)) {
+        $values = [];
+        while ($i + 1 < count($args) && ! str_starts_with($args[$i + 1], '--')) {
+            $values[] = $args[++$i];
+        }
+        $options[$name] = $values;
+        continue;
+    }
+    $options[$name] = $args[++$i] ?? null;
+}
+if ($options['structure'] && $options['structure-text']) {
+    fwrite(STDERR, "pdfplumber: --structure and --structure-text cannot be used together\n");
+    exit(2);
+}
+if (! in_array($options['format'], ['csv', 'json', 'text'], true)) {
+    fwrite(STDERR, "pdfplumber: --format is csv, json or text\n");
+    exit(2);
+}
+
+$pages = $options['pages'] === null ? null : [];
+foreach ($options['pages'] ?? [] as $spec) {
+    if (str_contains($spec, '-')) {
+        [$start, $end] = array_map('intval', explode('-', $spec, 2));
+        array_push($pages, ...range($start, $end));
+    } else {
+        $pages[] = (int) $spec;
+    }
+}
+$precision = $options['precision'] === null ? null : (int) $options['precision'];
+$pretty = $options['indent'] !== null;
+$laparams = null;
+if ($options['laparams'] !== null) {
+    $laparams = json_decode($options['laparams'], true);
+    if (! is_array($laparams)) {
+        fwrite(STDERR, "pdfplumber: --laparams is a JSON object\n");
+        exit(2);
+    }
+}
+
+try {
+    $data = $options['infile'] === null || $options['infile'] === '-'
+        ? (string) stream_get_contents(STDIN)
+        : (string) @file_get_contents($options['infile']);
+    if ($data === '') {
+        throw new RuntimeException('cannot read '.($options['infile'] ?? 'standard input'));
+    }
+    $pdf = Pdfplumber::fromString($data, $options['password'], $pages, laparams: $laparams);
+
+    if ($options['structure'] || $options['structure-text']) {
+        $tree = $pdf->structureTree();
+        if ($options['structure-text']) {
+            $texts = [];
+            foreach ($pdf->pages() as $page) {
+                foreach ($page->chars() as $char) {
+                    if ($char->mcid !== null) {
+                        $texts[$page->pageNumber][$char->mcid] = ($texts[$page->pageNumber][$char->mcid] ?? '').$char->text;
+                    }
+                }
+            }
+            $addText = static function (array $element) use (&$addText, $texts): array {
+                $element['children'] = array_map($addText, $element['children'] ?? []);
+                if ($element['children'] === []) {
+                    unset($element['children']);
+                }
+                if (isset($element['page_number'], $element['mcids'])) {
+                    $element['text'] = array_map(
+                        static fn (int $mcid): string => $texts[$element['page_number']][$mcid] ?? '',
+                        $element['mcids'],
+                    );
+                }
+
+                return $element;
+            };
+            $tree = array_map($addText, $tree);
+        }
+        $flags = JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION | ($pretty ? JSON_PRETTY_PRINT : 0)
+            | ($options['structure-text'] ? JSON_UNESCAPED_UNICODE : 0);
+        echo json_encode($tree, $flags), "\n";
+    } elseif ($options['format'] === 'csv') {
+        echo $pdf->toCsv($options['types'], $precision, $options['include-attrs'], $options['exclude-attrs']);
+    } elseif ($options['format'] === 'text') {
+        foreach ($pdf->pages() as $page) {
+            echo $page->extractText(layout: true), "\n";
+            $page->close();
+        }
+    } else {
+        echo $pdf->toJson($options['types'], $options['include-attrs'], $options['exclude-attrs'], $precision, $pretty);
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, 'pdfplumber: '.$e->getMessage()."\n");
+    exit(1);
+}
