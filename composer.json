@@ -45,6 +45,6 @@
     },
     "minimum-stability": "stable",
     "require-dev": {
-        "pestphp/pest": "^4.0"
+        "pestphp/pest": "^5.0"
     }
 }
