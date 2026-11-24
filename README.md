@@ -108,7 +108,7 @@ type, mcids, page number, attributes, children); `structTree()` gives the `Struc
 
 `$page->toImage(resolution: 150)` renders the page with Ghostscript and returns a `PageImage` to draw
 on with GD, as pdfplumber's `to_image()`: `drawLine(s)`, `drawRect(s)`, `drawCircle(s)`,
-`drawVline(s)`, `drawHline(s)`, `outlineWords()`, `outlineChars()`, `debugTable()`,
+`drawVline(s)`, `drawHline(s)`, `outlineWords()` (takes `extractWords()` options too), `outlineChars()`, `debugTable()`,
 `debugTablefinder()`, `reset()`, `copy()`, `save($path)`, `toPng()`. `$page->render()` gives the
 PNG data directly.
 

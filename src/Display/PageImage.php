@@ -331,6 +331,8 @@ final class PageImage
     }
 
     /**
+     * Other named arguments go to extractWords(), e.g. keepBlankChars: true.
+     *
      * @param list<int>|string $stroke
      * @param list<int>|string $fill
      */
@@ -340,8 +342,9 @@ final class PageImage
         int $strokeWidth = 1,
         float $xTolerance = 3,
         float $yTolerance = 3,
+        mixed ...$options,
     ): self {
-        $words = $this->page->extractWords(xTolerance: $xTolerance, yTolerance: $yTolerance);
+        $words = $this->page->extractWords(...$options, xTolerance: $xTolerance, yTolerance: $yTolerance);
 
         return $this->drawRects($words, $fill, $stroke, $strokeWidth);
     }
