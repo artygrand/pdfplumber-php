@@ -1,0 +1,23 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pest 5 needs PHP 8.4+, so 8.2 and 8.3 are not tested here
+        php: ['8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, zlib, gd, intl, openssl
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/pest
