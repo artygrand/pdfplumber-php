@@ -13,7 +13,7 @@ jobs:
         # Pest 5 needs PHP 8.4+, so 8.2 and 8.3 are not tested here
         php: ['8.4', '8.5']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
